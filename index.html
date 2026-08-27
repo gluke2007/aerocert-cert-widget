@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Certificate Generator — Grist Widget</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,500;9..144,600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-label="Certificate icon">
+        <path d="M12 2 L21 6.5 V13 C21 18 17 21.5 12 22.5 C7 21.5 3 18 3 13 V6.5 Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+        <path d="M8.5 12.5 L11 15 L15.5 9.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span>Certificate Generator</span>
+    </div>
+    <div class="topbar-actions">
+      <button id="btn-settings" class="btn btn-ghost" title="Layout settings">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 15.5A3.5 3.5 0 1 0 12 8.5a3.5 3.5 0 0 0 0 7Z" stroke="currentColor" stroke-width="1.6"/><path d="M19.4 13.5a7.4 7.4 0 0 0 0-3l2-1.5-2-3.4-2.3.9a7.4 7.4 0 0 0-2.6-1.5L14 2.5h-4l-.5 2.5a7.4 7.4 0 0 0-2.6 1.5l-2.3-.9-2 3.4 2 1.5a7.4 7.4 0 0 0 0 3l-2 1.5 2 3.4 2.3-.9a7.4 7.4 0 0 0 2.6 1.5l.5 2.5h4l.5-2.5a7.4 7.4 0 0 0 2.6-1.5l2.3.9 2-3.4-2-1.5Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+        Layout
+      </button>
+      <button id="btn-png" class="btn btn-ghost">PNG</button>
+      <button id="btn-pdf" class="btn btn-primary">Download PDF</button>
+    </div>
+  </header>
+
+  <main class="stage">
+
+    <!-- PREVIEW MODE -->
+    <section id="view-preview" class="panel">
+      <div id="empty-state" class="empty-state">
+        <div class="empty-icon">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none"><path d="M12 2 L21 6.5 V13 C21 18 17 21.5 12 22.5 C7 21.5 3 18 3 13 V6.5 Z" stroke="currentColor" stroke-width="1.3"/></svg>
+        </div>
+        <p id="empty-text">Select a row in the connected Grist table to preview a certificate.</p>
+        <button id="empty-settings-btn" class="btn btn-outline">Set up template</button>
+      </div>
+      <div id="canvas-wrap" class="canvas-wrap hidden">
+        <canvas id="cert-canvas"></canvas>
+      </div>
+    </section>
+
+    <!-- SETTINGS MODE -->
+    <section id="view-settings" class="panel hidden">
+      <div class="settings-grid">
+        <div class="settings-sidebar">
+          <div class="side-block">
+            <h3>Template image</h3>
+            <p class="hint">Upload your certificate background (PNG or JPG). Landscape works best.</p>
+            <label class="upload-btn">
+              <input type="file" id="bg-upload" accept="image/png, image/jpeg" hidden />
+              Choose image
+            </label>
+            <button id="btn-remove-bg" class="btn btn-text btn-danger">Remove image</button>
+          </div>
+
+          <div class="side-block">
+            <h3>Fields</h3>
+            <p class="hint">Drag a label onto the certificate, then tune it below.</p>
+            <div id="field-list" class="field-list"></div>
+          </div>
+
+          <div class="side-block" id="field-editor-block" style="display:none">
+            <h3 id="field-editor-title">Field style</h3>
+            <div class="field-editor" id="fe-text-group">
+              <label>Font size <input type="number" id="fe-size" min="6" max="120" step="1"></label>
+              <label>Color <input type="color" id="fe-color"></label>
+              <label>Align
+                <select id="fe-align">
+                  <option value="left">Left</option>
+                  <option value="center">Center</option>
+                  <option value="right">Right</option>
+                </select>
+              </label>
+              <label>Weight
+                <select id="fe-weight">
+                  <option value="400">Regular</option>
+                  <option value="600">Semibold</option>
+                  <option value="700">Bold</option>
+                </select>
+              </label>
+              <label>Font
+                <select id="fe-font">
+                  <option value="Inter, Arial, sans-serif">Sans (Inter)</option>
+                  <option value="Fraunces, Georgia, serif">Serif (Fraunces)</option>
+                  <option value="'Courier New', monospace">Monospace</option>
+                </select>
+              </label>
+            </div>
+            <div class="field-editor hidden" id="fe-qr-group">
+              <label>Size (px) <input type="number" id="fe-qr-size" min="40" max="400" step="5"></label>
+              <label>QR color <input type="color" id="fe-qr-color"></label>
+              <label>Background <input type="color" id="fe-qr-bg"></label>
+              <p class="hint">Encodes certificate number, engineer, course, dates, and a tamper-evident verification hash. Scanning it lets anyone cross-check the printed details against the hash.</p>
+            </div>
+          </div>
+
+          <div class="side-block actions-block">
+            <button id="btn-reset-layout" class="btn btn-text btn-danger">Reset layout</button>
+            <button id="btn-save-layout" class="btn btn-primary btn-block">Save layout</button>
+          </div>
+        </div>
+
+        <div class="settings-canvas-wrap">
+          <div id="editor-empty" class="empty-state">
+            <p>Upload a template image to start placing fields.</p>
+          </div>
+          <div id="editor-stage" class="editor-stage hidden">
+            <img id="editor-bg" alt="Certificate template" />
+            <div id="editor-fields"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="statusbar">
+    <span id="status-text">Connecting to Grist…</span>
+  </footer>
+</div>
+
+<script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
