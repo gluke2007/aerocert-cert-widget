@@ -431,19 +431,25 @@
   function startDrag(ev) {
     ev.preventDefault();
     var key = ev.currentTarget.dataset.key;
+    // selectField() rebuilds every label element in the DOM (positionAllLabels
+    // wipes and recreates them), which detaches ev.currentTarget from the page.
+    // Re-fetch the live element afterwards instead of dragging a stale/orphaned
+    // reference — dragging the orphan caused the field to appear frozen during
+    // the drag and then "jump" to its final position on the next re-render.
     selectField(key);
+    var liveEl = els.editorFields.querySelector('.field-label[data-key="' + key + '"]') || ev.currentTarget;
     var rect = els.editorStage.getBoundingClientRect();
     dragCtx = {
       key: key,
-      el: ev.currentTarget,
+      el: liveEl,
       pointerId: ev.pointerId,
       lastClientX: ev.clientX,
       lastClientY: ev.clientY,
       rectW: rect.width,
       rectH: rect.height
     };
-    ev.currentTarget.classList.add("dragging");
-    try { ev.currentTarget.setPointerCapture(ev.pointerId); } catch (e) { /* not supported */ }
+    liveEl.classList.add("dragging");
+    try { liveEl.setPointerCapture(ev.pointerId); } catch (e) { /* not supported */ }
     document.addEventListener("pointermove", onDrag);
     document.addEventListener("pointerup", stopDrag);
     document.addEventListener("pointercancel", stopDrag);
