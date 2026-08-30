@@ -345,6 +345,16 @@
     });
   }
 
+  function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+
+  function updatePositionInputs() {
+    var key = state.selectedFieldKey;
+    if (!key) return;
+    var style = state.config.fields[key];
+    if (document.activeElement !== els.fePosX) els.fePosX.value = Math.round(style.x * 100) / 100;
+    if (document.activeElement !== els.fePosY) els.fePosY.value = Math.round(style.y * 100) / 100;
+  }
+
   function selectField(key) {
     state.selectedFieldKey = key;
     buildFieldList();
@@ -352,6 +362,7 @@
     var style = state.config.fields[key];
     els.feBlock.style.display = "block";
     els.feTitle.textContent = def.title + " style";
+    updatePositionInputs();
     if (def.kind === "qr") {
       els.feTextGroup.classList.add("hidden");
       els.feQrGroup.classList.remove("hidden");
@@ -406,41 +417,85 @@
         label.textContent = "{" + f.title + "}";
       }
       label.dataset.key = f.key;
-      label.addEventListener("mousedown", startDrag);
+      label.addEventListener("pointerdown", startDrag);
       els.editorFields.appendChild(label);
     });
   }
 
+  // Dragging uses incremental pointer deltas rather than jumping the field to
+  // the cursor position. This means a field never "jumps" the instant you
+  // click it, and holding Shift scales movement down for fine adjustment.
   var dragCtx = null;
+  var PRECISION_FACTOR = 0.15;
 
   function startDrag(ev) {
     ev.preventDefault();
     var key = ev.currentTarget.dataset.key;
     selectField(key);
-    dragCtx = { key: key, el: ev.currentTarget };
+    var rect = els.editorStage.getBoundingClientRect();
+    dragCtx = {
+      key: key,
+      el: ev.currentTarget,
+      pointerId: ev.pointerId,
+      lastClientX: ev.clientX,
+      lastClientY: ev.clientY,
+      rectW: rect.width,
+      rectH: rect.height
+    };
     ev.currentTarget.classList.add("dragging");
-    document.addEventListener("mousemove", onDrag);
-    document.addEventListener("mouseup", stopDrag);
+    try { ev.currentTarget.setPointerCapture(ev.pointerId); } catch (e) { /* not supported */ }
+    document.addEventListener("pointermove", onDrag);
+    document.addEventListener("pointerup", stopDrag);
+    document.addEventListener("pointercancel", stopDrag);
   }
 
   function onDrag(ev) {
     if (!dragCtx) return;
-    var rect = els.editorStage.getBoundingClientRect();
-    var x = ((ev.clientX - rect.left) / rect.width) * 100;
-    var y = ((ev.clientY - rect.top) / rect.height) * 100;
-    x = Math.min(100, Math.max(0, x));
-    y = Math.min(100, Math.max(0, y));
-    state.config.fields[dragCtx.key].x = Math.round(x * 10) / 10;
-    state.config.fields[dragCtx.key].y = Math.round(y * 10) / 10;
-    dragCtx.el.style.left = x + "%";
-    dragCtx.el.style.top = y + "%";
+    var factor = ev.shiftKey ? PRECISION_FACTOR : 1;
+    var dxPx = ev.clientX - dragCtx.lastClientX;
+    var dyPx = ev.clientY - dragCtx.lastClientY;
+    dragCtx.lastClientX = ev.clientX;
+    dragCtx.lastClientY = ev.clientY;
+    var style = state.config.fields[dragCtx.key];
+    var x = clamp(style.x + (dxPx / dragCtx.rectW) * 100 * factor, 0, 100);
+    var y = clamp(style.y + (dyPx / dragCtx.rectH) * 100 * factor, 0, 100);
+    style.x = Math.round(x * 100) / 100;
+    style.y = Math.round(y * 100) / 100;
+    dragCtx.el.style.left = style.x + "%";
+    dragCtx.el.style.top = style.y + "%";
+    dragCtx.el.classList.toggle("precision", ev.shiftKey);
+    updatePositionInputs();
   }
 
   function stopDrag() {
-    if (dragCtx) dragCtx.el.classList.remove("dragging");
+    if (dragCtx) {
+      dragCtx.el.classList.remove("dragging");
+      dragCtx.el.classList.remove("precision");
+    }
     dragCtx = null;
-    document.removeEventListener("mousemove", onDrag);
-    document.removeEventListener("mouseup", stopDrag);
+    document.removeEventListener("pointermove", onDrag);
+    document.removeEventListener("pointerup", stopDrag);
+    document.removeEventListener("pointercancel", stopDrag);
+  }
+
+  function nudgeSelected(ev) {
+    if (state.mode !== "settings" || !state.selectedFieldKey) return;
+    var activeTag = document.activeElement && document.activeElement.tagName;
+    if (activeTag === "INPUT" || activeTag === "SELECT" || activeTag === "TEXTAREA") return;
+    var step = ev.shiftKey ? 1 : 0.1;
+    var style = state.config.fields[state.selectedFieldKey];
+    var moved = true;
+    if (ev.key === "ArrowUp") style.y = clamp(style.y - step, 0, 100);
+    else if (ev.key === "ArrowDown") style.y = clamp(style.y + step, 0, 100);
+    else if (ev.key === "ArrowLeft") style.x = clamp(style.x - step, 0, 100);
+    else if (ev.key === "ArrowRight") style.x = clamp(style.x + step, 0, 100);
+    else moved = false;
+    if (!moved) return;
+    ev.preventDefault();
+    style.x = Math.round(style.x * 100) / 100;
+    style.y = Math.round(style.y * 100) / 100;
+    positionAllLabels();
+    updatePositionInputs();
   }
 
   function wireFieldEditorInputs() {
@@ -473,6 +528,20 @@
     [els.feQrSize, els.feQrColor, els.feQrBg].forEach(function (el) {
       el.addEventListener("input", applyQr);
       el.addEventListener("change", applyQr);
+    });
+    function applyPosition() {
+      var key = state.selectedFieldKey;
+      if (!key) return;
+      var style = state.config.fields[key];
+      var x = parseFloat(els.fePosX.value);
+      var y = parseFloat(els.fePosY.value);
+      if (!isNaN(x)) style.x = clamp(x, 0, 100);
+      if (!isNaN(y)) style.y = clamp(y, 0, 100);
+      positionAllLabels();
+    }
+    [els.fePosX, els.fePosY].forEach(function (el) {
+      el.addEventListener("input", applyPosition);
+      el.addEventListener("change", applyPosition);
     });
   }
 
@@ -612,6 +681,8 @@
     els.fieldList = q("field-list");
     els.feBlock = q("field-editor-block");
     els.feTitle = q("field-editor-title");
+    els.fePosX = q("fe-pos-x");
+    els.fePosY = q("fe-pos-y");
     els.feSize = q("fe-size");
     els.feColor = q("fe-color");
     els.feAlign = q("fe-align");
@@ -648,6 +719,7 @@
     window.addEventListener("resize", function () {
       if (state.mode === "settings") positionAllLabels();
     });
+    document.addEventListener("keydown", nudgeSelected);
   }
 
   function init() {

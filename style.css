@@ -178,6 +178,8 @@ html, body {
 .field-chip .fc-toggle { font-size: 10.5px; color: var(--text-mute); }
 
 .field-editor { display: flex; flex-direction: column; gap: 10px; }
+.field-editor-row { flex-direction: row; gap: 8px; }
+.field-editor-row label { flex: 1; }
 .field-editor label {
   display: flex;
   flex-direction: column;
@@ -229,7 +231,9 @@ html, body {
   user-select: none;
   font-family: 'Inter', sans-serif;
   line-height: 1.2;
+  touch-action: none;
 }
+.field-label.precision { border-color: var(--navy); }
 .field-label.dragging { cursor: grabbing; box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
 .field-label.selected { border-color: var(--navy); background: rgba(255,255,255,0.95); }
 .field-label-qr {
