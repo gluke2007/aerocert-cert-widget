@@ -426,6 +426,7 @@
   // the cursor position. This means a field never "jumps" the instant you
   // click it, and holding Shift scales movement down for fine adjustment.
   var dragCtx = null;
+  var pendingOptions = null; // onOptions payload deferred because a drag was in progress
   var PRECISION_FACTOR = 0.15;
 
   function startDrag(ev) {
@@ -455,8 +456,29 @@
     document.addEventListener("pointercancel", stopDrag);
   }
 
+  // Re-fetches the live DOM element for the field currently being dragged.
+  // A rebuild can happen mid-drag for reasons outside our own click handling
+  // (e.g. Grist's onOptions callback firing spontaneously and calling
+  // enterSettings -> positionAllLabels), which would silently orphan a
+  // cached element reference and reproduce the jump bug. Looking it up fresh
+  // on every move keeps the drag glued to whatever element is actually
+  // on screen right now.
+  function liveDragEl() {
+    if (!dragCtx) return null;
+    var el = els.editorFields.querySelector('.field-label[data-key="' + dragCtx.key + '"]');
+    if (el && el !== dragCtx.el) {
+      // The element was replaced since the drag started (or since the last
+      // move) — carry the drag-in-progress visual state over to the new node.
+      el.classList.add("dragging");
+      dragCtx.el = el;
+    }
+    return el;
+  }
+
   function onDrag(ev) {
     if (!dragCtx) return;
+    var el = liveDragEl();
+    if (!el) return;
     var factor = ev.shiftKey ? PRECISION_FACTOR : 1;
     var dxPx = ev.clientX - dragCtx.lastClientX;
     var dyPx = ev.clientY - dragCtx.lastClientY;
@@ -467,21 +489,35 @@
     var y = clamp(style.y + (dyPx / dragCtx.rectH) * 100 * factor, 0, 100);
     style.x = Math.round(x * 100) / 100;
     style.y = Math.round(y * 100) / 100;
-    dragCtx.el.style.left = style.x + "%";
-    dragCtx.el.style.top = style.y + "%";
-    dragCtx.el.classList.toggle("precision", ev.shiftKey);
+    el.style.left = style.x + "%";
+    el.style.top = style.y + "%";
+    el.classList.toggle("precision", ev.shiftKey);
     updatePositionInputs();
   }
 
   function stopDrag() {
     if (dragCtx) {
-      dragCtx.el.classList.remove("dragging");
-      dragCtx.el.classList.remove("precision");
+      var el = liveDragEl();
+      if (el) {
+        el.classList.remove("dragging");
+        el.classList.remove("precision");
+      }
     }
     dragCtx = null;
     document.removeEventListener("pointermove", onDrag);
     document.removeEventListener("pointerup", stopDrag);
     document.removeEventListener("pointercancel", stopDrag);
+    if (pendingOptions !== null) {
+      var opts = pendingOptions;
+      pendingOptions = null;
+      applyIncomingOptions(opts);
+    }
+  }
+
+  function applyIncomingOptions(options) {
+    state.config = migrateConfig(options && options.certConfig);
+    loadBgImage(function () { renderPreview(); });
+    if (state.mode === "settings") enterSettings();
   }
 
   function nudgeSelected(ev) {
@@ -754,9 +790,17 @@
     });
 
     window.grist.onOptions(function (options) {
-      state.config = migrateConfig(options && options.certConfig);
-      loadBgImage(function () { renderPreview(); });
-      if (state.mode === "settings") enterSettings();
+      // Grist can deliver this callback at any time — including while the
+      // user is mid-drag on a field (e.g. an echo of our own save, another
+      // collaborator, or a reconnect). Applying it right then would both
+      // rebuild the DOM under the drag and overwrite the in-progress
+      // position with the last-saved value, which looks like a jump. Defer
+      // it until the drag finishes instead of discarding unsaved movement.
+      if (dragCtx) {
+        pendingOptions = options;
+        return;
+      }
+      applyIncomingOptions(options);
     });
 
     window.grist.onRecord(function (record, mappings) {
