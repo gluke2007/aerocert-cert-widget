@@ -62,7 +62,7 @@
     ALL_FIELD_DEFS.forEach(function (f) {
       fields[f.key] = Object.assign({}, DEFAULT_FIELD_STYLE[f.key]);
     });
-    return { bgImage: null, bgWidth: 1600, bgHeight: 1131, fields: fields };
+    return { bgImage: null, bgWidth: 1600, bgHeight: 1131, pdfPageNum: null, fields: fields };
   }
 
   // ---------- Page orientation ----------
@@ -99,6 +99,7 @@
     base.bgImage = saved.bgImage || null;
     base.bgWidth = saved.bgWidth || base.bgWidth;
     base.bgHeight = saved.bgHeight || base.bgHeight;
+    base.pdfPageNum = saved.pdfPageNum || null;
     if (saved.fields) {
       ALL_FIELD_DEFS.forEach(function (f) {
         if (saved.fields[f.key]) {
@@ -357,6 +358,7 @@
     buildFieldList();
     layoutEditorStage();
     positionAllLabels();
+    updatePdfPageHint();
   }
 
   function exitSettings() {
@@ -684,10 +686,32 @@
     reader.readAsDataURL(file);
   }
 
+  // Shows a small status line in place of the live page picker whenever the
+  // saved background came from a PDF page but the source file isn't loaded
+  // right now (e.g. right after a reload) — only the rendered bitmap of that
+  // page is persisted, not the original PDF, so the picker itself needs the
+  // file re-selected before another page can be picked. The remembered page
+  // number is still used to default the next upload to the same page.
+  function updatePdfPageHint() {
+    if (!els.pdfPageHint) return;
+    if (state.pdfDoc) {
+      els.pdfPageHint.classList.add("hidden");
+      return;
+    }
+    if (state.config.pdfPageNum) {
+      els.pdfPageHint.textContent = "Background last set from PDF page " + state.config.pdfPageNum + ". Upload the PDF again to switch pages.";
+      els.pdfPageHint.classList.remove("hidden");
+    } else {
+      els.pdfPageHint.classList.add("hidden");
+    }
+  }
+
   // Renders a single page of the currently-loaded PDF (state.pdfDoc) onto a
   // canvas and applies it as the background. Shared by the initial upload and
   // by the page-picker input, so switching pages later re-renders in place
-  // without needing the file to be re-selected.
+  // without needing the file to be re-selected. Remembers the chosen page
+  // number in state.config so it survives a save/reload and is used to
+  // default the next PDF upload to the same page.
   function renderPdfPage(pageNum) {
     if (!state.pdfDoc) return;
     pageNum = clamp(Math.round(pageNum), 1, state.pdfPageCount);
@@ -705,7 +729,9 @@
         ctx.fillStyle = "#ffffff";
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         return page.render({ canvasContext: ctx, viewport: viewport }).promise.then(function () {
+          state.config.pdfPageNum = pageNum;
           applyBgFromCanvas(canvas, "image/jpeg", 0.92);
+          updatePdfPageHint();
         });
       })
       .catch(function (err) {
@@ -732,18 +758,22 @@
         .then(function (pdf) {
           state.pdfDoc = pdf;
           state.pdfPageCount = pdf.numPages;
+          // Default to whichever page was remembered from a previous upload,
+          // as long as it's still within range of this document.
+          var remembered = state.config.pdfPageNum;
+          var startPage = (remembered && remembered >= 1 && remembered <= pdf.numPages) ? remembered : 1;
           if (els.pdfPageGroup && els.pdfPageNum && els.pdfPageTotal) {
             if (pdf.numPages > 1) {
               els.pdfPageNum.min = 1;
               els.pdfPageNum.max = pdf.numPages;
-              els.pdfPageNum.value = 1;
+              els.pdfPageNum.value = startPage;
               els.pdfPageTotal.textContent = "of " + pdf.numPages + " pages";
               els.pdfPageGroup.classList.remove("hidden");
             } else {
               els.pdfPageGroup.classList.add("hidden");
             }
           }
-          renderPdfPage(1);
+          renderPdfPage(startPage);
         })
         .catch(function (err) {
           console.error(err);
@@ -762,7 +792,9 @@
     if (isPdf) handlePdfUpload(file);
     else {
       hidePdfPagePicker();
+      state.config.pdfPageNum = null;
       handleImageUpload(file);
+      updatePdfPageHint();
     }
   }
 
@@ -774,21 +806,25 @@
 
   function resetLayout() {
     if (!confirm("Reset all field positions and styles to defaults? The template image is kept.")) return;
-    var bg = state.config.bgImage, w = state.config.bgWidth, h = state.config.bgHeight;
+    var bg = state.config.bgImage, w = state.config.bgWidth, h = state.config.bgHeight, pdfPageNum = state.config.pdfPageNum;
     state.config = defaultConfig();
     state.config.bgImage = bg;
     state.config.bgWidth = w;
     state.config.bgHeight = h;
+    state.config.pdfPageNum = pdfPageNum;
     state.selectedFieldKey = null;
     els.feBlock.style.display = "none";
     buildFieldList();
     positionAllLabels();
+    updatePdfPageHint();
   }
 
   function removeBg() {
     state.config.bgImage = null;
     bgImgLoaded = false;
     hidePdfPagePicker();
+    state.config.pdfPageNum = null;
+    updatePdfPageHint();
     els.editorEmpty.classList.remove("hidden");
     els.editorStage.classList.add("hidden");
     renderPreview();
@@ -875,6 +911,7 @@
     els.pdfPageGroup = q("pdf-page-group");
     els.pdfPageNum = q("pdf-page-num");
     els.pdfPageTotal = q("pdf-page-total");
+    els.pdfPageHint = q("pdf-page-hint");
     els.fieldList = q("field-list");
     els.feBlock = q("field-editor-block");
     els.feTitle = q("field-editor-title");
