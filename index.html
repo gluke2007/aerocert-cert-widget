@@ -66,6 +66,12 @@
               <input type="file" id="bg-upload" accept="image/png, image/jpeg, application/pdf" hidden />
               Choose image or PDF
             </label>
+            <div class="field-editor hidden" id="pdf-page-group" style="margin-top:10px">
+              <label>PDF page
+                <input type="number" id="pdf-page-num" min="1" step="1" value="1" style="width:64px">
+              </label>
+              <span id="pdf-page-total" class="hint" style="margin-left:6px"></span>
+            </div>
             <button id="btn-remove-bg" class="btn btn-text btn-danger">Remove image</button>
           </div>
 

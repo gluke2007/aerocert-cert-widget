@@ -114,7 +114,9 @@
     recordId: null,
     config: defaultConfig(),
     selectedFieldKey: null,
-    mode: "preview" // 'preview' | 'settings'
+    mode: "preview", // 'preview' | 'settings'
+    pdfDoc: null, // in-memory pdf.js document for the currently uploaded PDF (not persisted)
+    pdfPageCount: 0
   };
 
   var els = {};
@@ -682,6 +684,42 @@
     reader.readAsDataURL(file);
   }
 
+  // Renders a single page of the currently-loaded PDF (state.pdfDoc) onto a
+  // canvas and applies it as the background. Shared by the initial upload and
+  // by the page-picker input, so switching pages later re-renders in place
+  // without needing the file to be re-selected.
+  function renderPdfPage(pageNum) {
+    if (!state.pdfDoc) return;
+    pageNum = clamp(Math.round(pageNum), 1, state.pdfPageCount);
+    if (els.pdfPageNum) els.pdfPageNum.value = pageNum;
+    state.pdfDoc.getPage(pageNum)
+      .then(function (page) {
+        var base = page.getViewport({ scale: 1 });
+        var TARGET_LONG_EDGE = 2000;
+        var scale = TARGET_LONG_EDGE / Math.max(base.width, base.height);
+        var viewport = page.getViewport({ scale: scale });
+        var canvas = document.createElement("canvas");
+        canvas.width = Math.round(viewport.width);
+        canvas.height = Math.round(viewport.height);
+        var ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        return page.render({ canvasContext: ctx, viewport: viewport }).promise.then(function () {
+          applyBgFromCanvas(canvas, "image/jpeg", 0.92);
+        });
+      })
+      .catch(function (err) {
+        console.error(err);
+        alert("Could not render that PDF page. Please try a different page or file.");
+      });
+  }
+
+  function hidePdfPagePicker() {
+    state.pdfDoc = null;
+    state.pdfPageCount = 0;
+    if (els.pdfPageGroup) els.pdfPageGroup.classList.add("hidden");
+  }
+
   function handlePdfUpload(file) {
     var reader = new FileReader();
     reader.onload = function () {
@@ -691,24 +729,25 @@
         return;
       }
       pdfjsLib.getDocument({ data: reader.result }).promise
-        .then(function (pdf) { return pdf.getPage(1); })
-        .then(function (page) {
-          var base = page.getViewport({ scale: 1 });
-          var TARGET_LONG_EDGE = 2000;
-          var scale = TARGET_LONG_EDGE / Math.max(base.width, base.height);
-          var viewport = page.getViewport({ scale: scale });
-          var canvas = document.createElement("canvas");
-          canvas.width = Math.round(viewport.width);
-          canvas.height = Math.round(viewport.height);
-          var ctx = canvas.getContext("2d");
-          ctx.fillStyle = "#ffffff";
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-          return page.render({ canvasContext: ctx, viewport: viewport }).promise.then(function () {
-            applyBgFromCanvas(canvas, "image/jpeg", 0.92);
-          });
+        .then(function (pdf) {
+          state.pdfDoc = pdf;
+          state.pdfPageCount = pdf.numPages;
+          if (els.pdfPageGroup && els.pdfPageNum && els.pdfPageTotal) {
+            if (pdf.numPages > 1) {
+              els.pdfPageNum.min = 1;
+              els.pdfPageNum.max = pdf.numPages;
+              els.pdfPageNum.value = 1;
+              els.pdfPageTotal.textContent = "of " + pdf.numPages + " pages";
+              els.pdfPageGroup.classList.remove("hidden");
+            } else {
+              els.pdfPageGroup.classList.add("hidden");
+            }
+          }
+          renderPdfPage(1);
         })
         .catch(function (err) {
           console.error(err);
+          hidePdfPagePicker();
           alert("Could not read that PDF. Please try a different file, or upload a PNG/JPG of the first page instead.");
         });
     };
@@ -721,7 +760,10 @@
   function handleBgUpload(file) {
     var isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name || "");
     if (isPdf) handlePdfUpload(file);
-    else handleImageUpload(file);
+    else {
+      hidePdfPagePicker();
+      handleImageUpload(file);
+    }
   }
 
   function saveLayout() {
@@ -746,6 +788,7 @@
   function removeBg() {
     state.config.bgImage = null;
     bgImgLoaded = false;
+    hidePdfPagePicker();
     els.editorEmpty.classList.remove("hidden");
     els.editorStage.classList.add("hidden");
     renderPreview();
@@ -829,6 +872,9 @@
     els.orientation = q("page-orientation");
     els.bgUpload = q("bg-upload");
     els.btnRemoveBg = q("btn-remove-bg");
+    els.pdfPageGroup = q("pdf-page-group");
+    els.pdfPageNum = q("pdf-page-num");
+    els.pdfPageTotal = q("pdf-page-total");
     els.fieldList = q("field-list");
     els.feBlock = q("field-editor-block");
     els.feTitle = q("field-editor-title");
@@ -867,6 +913,11 @@
       });
     }
     els.btnRemoveBg.addEventListener("click", removeBg);
+    if (els.pdfPageNum) {
+      els.pdfPageNum.addEventListener("change", function () {
+        renderPdfPage(parseInt(els.pdfPageNum.value, 10) || 1);
+      });
+    }
     els.btnResetLayout.addEventListener("click", resetLayout);
     els.btnSaveLayout.addEventListener("click", function () {
       saveLayout();
