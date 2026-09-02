@@ -8,6 +8,11 @@
 
   var DEMO = new URLSearchParams(location.search).has("demo");
 
+  if (window["pdfjs-dist/build/pdf"]) {
+    window["pdfjs-dist/build/pdf"].GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  }
+
   var FIELD_DEFS = [
     { key: "EngineerName", title: "Engineer Name", type: "Text", optional: false, kind: "text" },
     { key: "CourseName", title: "Course / Qualification", type: "Text", optional: false, kind: "text" },
@@ -58,6 +63,34 @@
       fields[f.key] = Object.assign({}, DEFAULT_FIELD_STYLE[f.key]);
     });
     return { bgImage: null, bgWidth: 1600, bgHeight: 1131, fields: fields };
+  }
+
+  // ---------- Page orientation ----------
+  // bgWidth/bgHeight represent the PAGE the certificate is printed on, not the
+  // raw pixel size of whatever file was uploaded. This lets a landscape or
+  // portrait scan/PDF be fitted (never stretched or cropped) onto whichever
+  // page shape the user picks.
+  var PAGE_LONG_EDGE = 1600;
+  var PAGE_SHORT_EDGE = Math.round(PAGE_LONG_EDGE / Math.SQRT2);
+
+  function pageDimsForOrientation(o) {
+    return o === "portrait"
+      ? { w: PAGE_SHORT_EDGE, h: PAGE_LONG_EDGE }
+      : { w: PAGE_LONG_EDGE, h: PAGE_SHORT_EDGE };
+  }
+
+  function currentOrientation() {
+    return state.config.bgWidth >= state.config.bgHeight ? "landscape" : "portrait";
+  }
+
+  function setOrientation(o) {
+    var d = pageDimsForOrientation(o === "portrait" ? "portrait" : "landscape");
+    state.config.bgWidth = d.w;
+    state.config.bgHeight = d.h;
+    if (els.orientation) els.orientation.value = currentOrientation();
+    layoutEditorStage();
+    positionAllLabels();
+    renderPreview();
   }
 
   function migrateConfig(saved) {
@@ -211,8 +244,10 @@
     bgImgEl = new Image();
     bgImgEl.onload = function () {
       bgImgLoaded = true;
-      state.config.bgWidth = bgImgEl.naturalWidth;
-      state.config.bgHeight = bgImgEl.naturalHeight;
+      if (cb) cb();
+    };
+    bgImgEl.onerror = function () {
+      bgImgLoaded = false;
       if (cb) cb();
     };
     bgImgEl.src = state.config.bgImage;
@@ -224,10 +259,16 @@
     canvas.height = h;
     var ctx = canvas.getContext("2d");
     ctx.clearRect(0, 0, w, h);
-    if (bgImgLoaded) ctx.drawImage(bgImgEl, 0, 0, w, h);
-    else {
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, w, h);
+    // Fit the uploaded template inside the chosen page (contain), never
+    // stretching or cropping it, so switching orientation never distorts it.
+    if (bgImgLoaded && bgImgEl.naturalWidth && bgImgEl.naturalHeight) {
+      var iw = bgImgEl.naturalWidth, ih = bgImgEl.naturalHeight;
+      var fitScale = Math.min(w / iw, h / ih);
+      var dw = iw * fitScale, dh = ih * fitScale;
+      var dx = (w - dw) / 2, dy = (h - dh) / 2;
+      ctx.drawImage(bgImgEl, dx, dy, dw, dh);
     }
     var values = getValues();
     var audit = await computeAuditInfo(values);
@@ -302,6 +343,7 @@
     state.mode = "settings";
     els.viewPreview.classList.add("hidden");
     els.viewSettings.classList.remove("hidden");
+    if (els.orientation) els.orientation.value = currentOrientation();
     if (state.config.bgImage) {
       els.editorEmpty.classList.add("hidden");
       els.editorStage.classList.remove("hidden");
@@ -311,6 +353,7 @@
       els.editorStage.classList.add("hidden");
     }
     buildFieldList();
+    layoutEditorStage();
     positionAllLabels();
   }
 
@@ -381,9 +424,23 @@
     positionAllLabels();
   }
 
+  // The stage's on-screen box always mirrors the chosen page dimensions
+  // (bgWidth/bgHeight), independent of whatever image is fitted inside it —
+  // so field positions/sizes scale against the page, not the raw file.
+  function layoutEditorStage() {
+    var w = state.config.bgWidth, h = state.config.bgHeight;
+    if (!w || !h || !els.editorStage) return;
+    var maxW = 720, maxH = window.innerHeight * 0.7;
+    var scale = Math.min(maxW / w, maxH / h);
+    els.editorStage.style.width = Math.round(w * scale) + "px";
+    els.editorStage.style.height = Math.round(h * scale) + "px";
+  }
+
   function editorScale() {
-    if (!els.editorBg.naturalWidth) return 1;
-    return els.editorBg.clientWidth / els.editorBg.naturalWidth;
+    var w = state.config.bgWidth;
+    var rectW = els.editorStage && els.editorStage.clientWidth;
+    if (!w || !rectW) return 1;
+    return rectW / w;
   }
 
   function positionAllLabels() {
@@ -587,7 +644,21 @@
     });
   }
 
-  function handleBgUpload(file) {
+  // Shared finisher for both raster-image and PDF-rendered uploads: stores the
+  // fitted background, snaps the page orientation to match the new file's own
+  // aspect (the user can still override it with the orientation selector),
+  // and refreshes the editor/preview.
+  function applyBgFromCanvas(canvas, mime, quality) {
+    var dataUrl = canvas.toDataURL(mime, quality);
+    state.config.bgImage = dataUrl;
+    setOrientation(canvas.width >= canvas.height ? "landscape" : "portrait");
+    els.editorEmpty.classList.add("hidden");
+    els.editorStage.classList.remove("hidden");
+    els.editorBg.src = dataUrl;
+    loadBgImage(function () { renderPreview(); });
+  }
+
+  function handleImageUpload(file) {
     var reader = new FileReader();
     reader.onload = function () {
       var img = new Image();
@@ -601,19 +672,56 @@
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         var quality = file.type === "image/png" ? undefined : 0.88;
         var mime = file.type === "image/png" ? "image/png" : "image/jpeg";
-        var dataUrl = canvas.toDataURL(mime, quality);
-        state.config.bgImage = dataUrl;
-        state.config.bgWidth = canvas.width;
-        state.config.bgHeight = canvas.height;
-        els.editorEmpty.classList.add("hidden");
-        els.editorStage.classList.remove("hidden");
-        els.editorBg.src = dataUrl;
-        els.editorBg.onload = function () { positionAllLabels(); };
-        loadBgImage(function () { renderPreview(); });
+        applyBgFromCanvas(canvas, mime, quality);
+      };
+      img.onerror = function () {
+        alert("Could not read that image. Please try a different file.");
       };
       img.src = reader.result;
     };
     reader.readAsDataURL(file);
+  }
+
+  function handlePdfUpload(file) {
+    var reader = new FileReader();
+    reader.onload = function () {
+      var pdfjsLib = window["pdfjs-dist/build/pdf"];
+      if (!pdfjsLib) {
+        alert("PDF support failed to load. Please try again, or upload a PNG/JPG instead.");
+        return;
+      }
+      pdfjsLib.getDocument({ data: reader.result }).promise
+        .then(function (pdf) { return pdf.getPage(1); })
+        .then(function (page) {
+          var base = page.getViewport({ scale: 1 });
+          var TARGET_LONG_EDGE = 2000;
+          var scale = TARGET_LONG_EDGE / Math.max(base.width, base.height);
+          var viewport = page.getViewport({ scale: scale });
+          var canvas = document.createElement("canvas");
+          canvas.width = Math.round(viewport.width);
+          canvas.height = Math.round(viewport.height);
+          var ctx = canvas.getContext("2d");
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          return page.render({ canvasContext: ctx, viewport: viewport }).promise.then(function () {
+            applyBgFromCanvas(canvas, "image/jpeg", 0.92);
+          });
+        })
+        .catch(function (err) {
+          console.error(err);
+          alert("Could not read that PDF. Please try a different file, or upload a PNG/JPG of the first page instead.");
+        });
+    };
+    reader.onerror = function () {
+      alert("Could not read that file. Please try again.");
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  function handleBgUpload(file) {
+    var isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name || "");
+    if (isPdf) handlePdfUpload(file);
+    else handleImageUpload(file);
   }
 
   function saveLayout() {
@@ -718,6 +826,7 @@
     els.emptySettingsBtn = q("empty-settings-btn");
     els.btnPng = q("btn-png");
     els.btnPdf = q("btn-pdf");
+    els.orientation = q("page-orientation");
     els.bgUpload = q("bg-upload");
     els.btnRemoveBg = q("btn-remove-bg");
     els.fieldList = q("field-list");
@@ -750,7 +859,13 @@
     els.btnPdf.addEventListener("click", exportPdf);
     els.bgUpload.addEventListener("change", function (ev) {
       if (ev.target.files && ev.target.files[0]) handleBgUpload(ev.target.files[0]);
+      ev.target.value = "";
     });
+    if (els.orientation) {
+      els.orientation.addEventListener("change", function () {
+        setOrientation(els.orientation.value);
+      });
+    }
     els.btnRemoveBg.addEventListener("click", removeBg);
     els.btnResetLayout.addEventListener("click", resetLayout);
     els.btnSaveLayout.addEventListener("click", function () {
@@ -759,7 +874,7 @@
     });
     wireFieldEditorInputs();
     window.addEventListener("resize", function () {
-      if (state.mode === "settings") positionAllLabels();
+      if (state.mode === "settings") { layoutEditorStage(); positionAllLabels(); }
     });
     document.addEventListener("keydown", nudgeSelected);
   }

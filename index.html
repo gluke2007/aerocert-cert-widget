@@ -53,10 +53,18 @@
         <div class="settings-sidebar">
           <div class="side-block">
             <h3>Template image</h3>
-            <p class="hint">Upload your certificate background (PNG or JPG). Landscape works best.</p>
+            <p class="hint">Upload your certificate background (PNG, JPG, or PDF). Pick portrait or landscape below — your file is fitted to the page without cropping or stretching.</p>
+            <div class="field-editor" style="margin-bottom:10px">
+              <label>Page orientation
+                <select id="page-orientation">
+                  <option value="landscape">Landscape</option>
+                  <option value="portrait">Portrait</option>
+                </select>
+              </label>
+            </div>
             <label class="upload-btn">
-              <input type="file" id="bg-upload" accept="image/png, image/jpeg" hidden />
-              Choose image
+              <input type="file" id="bg-upload" accept="image/png, image/jpeg, application/pdf" hidden />
+              Choose image or PDF
             </label>
             <button id="btn-remove-bg" class="btn btn-text btn-danger">Remove image</button>
           </div>
@@ -134,6 +142,7 @@
 <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
