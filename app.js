@@ -62,7 +62,7 @@
     ALL_FIELD_DEFS.forEach(function (f) {
       fields[f.key] = Object.assign({}, DEFAULT_FIELD_STYLE[f.key]);
     });
-    return { bgImage: null, bgWidth: 1600, bgHeight: 1131, pdfPageNum: null, fields: fields };
+    return { bgImage: null, bgWidth: 1600, bgHeight: 1131, pdfPageNum: null, pdfSource: null, fields: fields };
   }
 
   // ---------- Page orientation ----------
@@ -100,6 +100,7 @@
     base.bgWidth = saved.bgWidth || base.bgWidth;
     base.bgHeight = saved.bgHeight || base.bgHeight;
     base.pdfPageNum = saved.pdfPageNum || null;
+    base.pdfSource = saved.pdfSource || null;
     if (saved.fields) {
       ALL_FIELD_DEFS.forEach(function (f) {
         if (saved.fields[f.key]) {
@@ -578,6 +579,7 @@
   function applyIncomingOptions(options) {
     state.config = migrateConfig(options && options.certConfig);
     loadBgImage(function () { renderPreview(); });
+    restorePdfDocFromSource();
     if (state.mode === "settings") enterSettings();
   }
 
@@ -686,12 +688,10 @@
     reader.readAsDataURL(file);
   }
 
-  // Shows a small status line in place of the live page picker whenever the
-  // saved background came from a PDF page but the source file isn't loaded
-  // right now (e.g. right after a reload) — only the rendered bitmap of that
-  // page is persisted, not the original PDF, so the picker itself needs the
-  // file re-selected before another page can be picked. The remembered page
-  // number is still used to default the next upload to the same page.
+  // Fallback status line for the rare case the live picker couldn't be
+  // restored from the persisted PDF (e.g. pdf.js hasn't finished loading yet,
+  // or the stored source failed to parse) but we still know which page was
+  // last used.
   function updatePdfPageHint() {
     if (!els.pdfPageHint) return;
     if (state.pdfDoc) {
@@ -704,6 +704,78 @@
     } else {
       els.pdfPageHint.classList.add("hidden");
     }
+  }
+
+  // ---------- PDF byte <-> base64 helpers ----------
+  // The original PDF is persisted (as a data URL, alongside the rendered
+  // bgImage bitmap) so the page picker keeps working after a reload without
+  // re-uploading. pdf.js can detach/consume the buffer it's given, so we
+  // always hand it a freshly-decoded copy rather than reusing one.
+  function arrayBufferToBase64(buffer) {
+    var bytes = new Uint8Array(buffer);
+    var CHUNK = 0x8000;
+    var parts = [];
+    for (var i = 0; i < bytes.length; i += CHUNK) {
+      parts.push(String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK)));
+    }
+    return btoa(parts.join(""));
+  }
+
+  function dataUrlToUint8Array(dataUrl) {
+    var base64 = dataUrl.split(",")[1] || "";
+    var binary = atob(base64);
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+
+  // Rehydrates state.pdfDoc/state.pdfPageCount and the page-picker UI from a
+  // persisted config's pdfSource, without touching the already-loaded
+  // background image. Called whenever a config arrives (initial load or a
+  // later onOptions update) so the picker is live again after a reload.
+  function restorePdfDocFromSource() {
+    if (!state.config.pdfSource) {
+      hidePdfPagePicker();
+      updatePdfPageHint();
+      return;
+    }
+    var pdfjsLib = window["pdfjs-dist/build/pdf"];
+    if (!pdfjsLib) {
+      // pdf.js hasn't finished loading yet; fall back to the status hint.
+      updatePdfPageHint();
+      return;
+    }
+    var bytes;
+    try {
+      bytes = dataUrlToUint8Array(state.config.pdfSource);
+    } catch (err) {
+      console.error(err);
+      hidePdfPagePicker();
+      updatePdfPageHint();
+      return;
+    }
+    pdfjsLib.getDocument({ data: bytes }).promise
+      .then(function (pdf) {
+        state.pdfDoc = pdf;
+        state.pdfPageCount = pdf.numPages;
+        if (els.pdfPageGroup && els.pdfPageNum && els.pdfPageTotal) {
+          if (pdf.numPages > 1) {
+            els.pdfPageNum.min = 1;
+            els.pdfPageNum.max = pdf.numPages;
+            els.pdfPageNum.value = clamp(state.config.pdfPageNum || 1, 1, pdf.numPages);
+            els.pdfPageTotal.textContent = "of " + pdf.numPages + " pages";
+            els.pdfPageGroup.classList.remove("hidden");
+          } else {
+            els.pdfPageGroup.classList.add("hidden");
+          }
+        }
+        updatePdfPageHint();
+      })
+      .catch(function (err) {
+        console.error(err);
+        hidePdfPagePicker();
+        updatePdfPageHint();
+      });
   }
 
   // Renders a single page of the currently-loaded PDF (state.pdfDoc) onto a
@@ -731,6 +803,10 @@
         return page.render({ canvasContext: ctx, viewport: viewport }).promise.then(function () {
           state.config.pdfPageNum = pageNum;
           applyBgFromCanvas(canvas, "image/jpeg", 0.92);
+          if (els.pdfPageGroup && els.pdfPageTotal && state.pdfPageCount > 1) {
+            els.pdfPageTotal.textContent = "of " + state.pdfPageCount + " pages";
+            els.pdfPageGroup.classList.remove("hidden");
+          }
           updatePdfPageHint();
         });
       })
@@ -740,13 +816,28 @@
       });
   }
 
+  // Clears the live in-memory pdf.js document/picker only — does not touch
+  // the persisted config (state.config.pdfSource/pdfPageNum), so a restore
+  // can still rebuild it from a saved config afterward.
   function hidePdfPagePicker() {
     state.pdfDoc = null;
     state.pdfPageCount = 0;
     if (els.pdfPageGroup) els.pdfPageGroup.classList.add("hidden");
   }
 
+  // Grist stores widget options (including our whole certConfig, now with
+  // the PDF embedded) as a JSON blob with practical size limits. Warn early
+  // for unusually large files rather than silently failing on save later.
+  var PDF_SIZE_WARN_BYTES = 8 * 1024 * 1024;
+
   function handlePdfUpload(file) {
+    if (file.size > PDF_SIZE_WARN_BYTES) {
+      var proceed = confirm(
+        "This PDF is " + Math.round(file.size / 1024 / 1024) + "MB. Storing the full file with the certificate layout may be " +
+        "slow to save or hit Grist's storage limits. Continue anyway?"
+      );
+      if (!proceed) return;
+    }
     var reader = new FileReader();
     reader.onload = function () {
       var pdfjsLib = window["pdfjs-dist/build/pdf"];
@@ -754,10 +845,12 @@
         alert("PDF support failed to load. Please try again, or upload a PNG/JPG instead.");
         return;
       }
+      var pdfBase64Source = "data:application/pdf;base64," + arrayBufferToBase64(reader.result);
       pdfjsLib.getDocument({ data: reader.result }).promise
         .then(function (pdf) {
           state.pdfDoc = pdf;
           state.pdfPageCount = pdf.numPages;
+          state.config.pdfSource = pdfBase64Source;
           // Default to whichever page was remembered from a previous upload,
           // as long as it's still within range of this document.
           var remembered = state.config.pdfPageNum;
@@ -793,6 +886,7 @@
     else {
       hidePdfPagePicker();
       state.config.pdfPageNum = null;
+      state.config.pdfSource = null;
       handleImageUpload(file);
       updatePdfPageHint();
     }
@@ -806,12 +900,14 @@
 
   function resetLayout() {
     if (!confirm("Reset all field positions and styles to defaults? The template image is kept.")) return;
-    var bg = state.config.bgImage, w = state.config.bgWidth, h = state.config.bgHeight, pdfPageNum = state.config.pdfPageNum;
+    var bg = state.config.bgImage, w = state.config.bgWidth, h = state.config.bgHeight,
+        pdfPageNum = state.config.pdfPageNum, pdfSource = state.config.pdfSource;
     state.config = defaultConfig();
     state.config.bgImage = bg;
     state.config.bgWidth = w;
     state.config.bgHeight = h;
     state.config.pdfPageNum = pdfPageNum;
+    state.config.pdfSource = pdfSource;
     state.selectedFieldKey = null;
     els.feBlock.style.display = "none";
     buildFieldList();
@@ -824,6 +920,7 @@
     bgImgLoaded = false;
     hidePdfPagePicker();
     state.config.pdfPageNum = null;
+    state.config.pdfSource = null;
     updatePdfPageHint();
     els.editorEmpty.classList.remove("hidden");
     els.editorStage.classList.add("hidden");
@@ -975,6 +1072,7 @@
       state.config = migrateConfig(demoConfigMemory);
       state.record = DEMO_RECORD;
       loadBgImage(function () { renderPreview(); });
+      restorePdfDocFromSource();
       updateStatusFromState();
       renderPreview();
       return;
