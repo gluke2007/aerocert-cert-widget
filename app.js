@@ -57,6 +57,37 @@
     RegulationBasis: "UK CAA Part-66 / Part-147 Compliant"
   };
 
+  // Sample rows for exercising batch generation in demo mode (?demo=1) without
+  // a connected Grist table. __rowId mirrors the Grist row id used to key the
+  // audit hash / QR payload per certificate.
+  var DEMO_RECORDS = [
+    Object.assign({ __rowId: 1 }, DEMO_RECORD),
+    {
+      __rowId: 2, EngineerName: "Amara Chen", CourseName: "Part-66 Category B2 — Avionics",
+      CertificateNumber: "EASA-B2-2026-0091", IssueDate: Math.floor(new Date("2026-05-02").getTime() / 1000),
+      ExpiryDate: Math.floor(new Date("2029-05-02").getTime() / 1000), Instructor: "Priya Shah",
+      Organization: "Skyline Aviation Training Ltd.", RegulationBasis: "EASA Part-66 / Part-147 Compliant"
+    },
+    {
+      __rowId: 3, EngineerName: "Dmitri Kowalski", CourseName: "Part-66 Category A — Mechanical",
+      CertificateNumber: "DUAL-A-2026-0212", IssueDate: Math.floor(new Date("2026-04-18").getTime() / 1000),
+      ExpiryDate: Math.floor(new Date("2029-04-18").getTime() / 1000), Instructor: "Gary Luke",
+      Organization: "Northbridge Technical College", RegulationBasis: "EASA/CAA Dual Approval"
+    },
+    {
+      __rowId: 4, EngineerName: "Fatima Al-Rashid", CourseName: "Part-66 Category B1.3 — Turbine Helicopter",
+      CertificateNumber: "CAA-B13-2026-0355", IssueDate: Math.floor(new Date("2026-07-09").getTime() / 1000),
+      ExpiryDate: Math.floor(new Date("2029-07-09").getTime() / 1000), Instructor: "Priya Shah",
+      Organization: "Northbridge Technical College", RegulationBasis: "UK CAA Part-66 Compliant"
+    },
+    {
+      __rowId: 5, EngineerName: "Owen Fitzgerald", CourseName: "Human Factors Recurrent",
+      CertificateNumber: "REC-2026-1180", IssueDate: Math.floor(new Date("2026-08-01").getTime() / 1000),
+      ExpiryDate: Math.floor(new Date("2029-08-01").getTime() / 1000), Instructor: "Gary Luke",
+      Organization: "Skyline Aviation Training Ltd.", RegulationBasis: "N/A"
+    }
+  ];
+
   // Three independently-managed background slots. "default" is the fallback
   // used whenever a record's Regulation Basis text doesn't clearly match
   // EASA or CAA (or when the matching slot has no upload of its own).
@@ -147,7 +178,8 @@
     mode: "preview", // 'preview' | 'settings'
     editingSlot: "default", // which background slot Settings is currently editing
     pdfDocs: { default: null, easa: null, caa: null }, // in-memory pdf.js docs per slot (not persisted)
-    pdfPageCounts: { default: 0, easa: 0, caa: 0 }
+    pdfPageCounts: { default: 0, easa: 0, caa: 0 },
+    allRecords: [] // every row currently linked/visible in Grist, mapped to our field keys; used for batch generation
   };
 
   var els = {};
@@ -1136,6 +1168,166 @@
     return base.replace(/[^a-z0-9\-_]+/gi, "_").slice(0, 60) || "certificate";
   }
 
+  // ---------- Batch export ----------
+  // Lets the user pick one field + one of its distinct values, then renders
+  // every matching row from state.allRecords (everything currently linked in
+  // Grist) into a single combined multi-page PDF, reusing the same
+  // drawOnCanvas() pipeline as the single-record export so backgrounds,
+  // fields, QR code and audit stamp all resolve exactly as they do on-screen.
+
+  function fieldDefByKey(key) {
+    for (var i = 0; i < FIELD_DEFS.length; i++) {
+      if (FIELD_DEFS[i].key === key) return FIELD_DEFS[i];
+    }
+    return null;
+  }
+
+  function fieldDisplayValue(rec, fieldDef) {
+    var v = rec[fieldDef.key];
+    if (fieldDef.key === "IssueDate" || fieldDef.key === "ExpiryDate") v = formatDate(v);
+    return v == null ? "" : String(v);
+  }
+
+  function populateBatchFieldSelect() {
+    if (!els.batchFieldSelect) return;
+    els.batchFieldSelect.innerHTML = "";
+    FIELD_DEFS.forEach(function (f) {
+      var opt = document.createElement("option");
+      opt.value = f.key;
+      opt.textContent = f.title;
+      els.batchFieldSelect.appendChild(opt);
+    });
+  }
+
+  function populateBatchValueSelect() {
+    if (!els.batchValueSelect) return;
+    var fieldDef = fieldDefByKey(els.batchFieldSelect.value);
+    els.batchValueSelect.innerHTML = "";
+    if (!fieldDef) return;
+    var seen = {};
+    var values = [];
+    state.allRecords.forEach(function (rec) {
+      var v = fieldDisplayValue(rec, fieldDef);
+      if (v && !seen[v]) { seen[v] = true; values.push(v); }
+    });
+    values.sort(function (a, b) { return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }); });
+    if (!values.length) {
+      var opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "No values found";
+      els.batchValueSelect.appendChild(opt);
+      els.batchValueSelect.disabled = true;
+      return;
+    }
+    els.batchValueSelect.disabled = false;
+    values.forEach(function (v) {
+      var opt = document.createElement("option");
+      opt.value = v;
+      opt.textContent = v;
+      els.batchValueSelect.appendChild(opt);
+    });
+  }
+
+  function getBatchMatches() {
+    var fieldDef = fieldDefByKey(els.batchFieldSelect ? els.batchFieldSelect.value : null);
+    var value = els.batchValueSelect ? els.batchValueSelect.value : "";
+    if (!fieldDef || !value) return [];
+    return state.allRecords.filter(function (rec) { return fieldDisplayValue(rec, fieldDef) === value; });
+  }
+
+  function updateBatchMatchCount() {
+    if (!els.batchMatchCount) return;
+    var matches = getBatchMatches();
+    var n = matches.length;
+    if (!els.batchValueSelect || !els.batchValueSelect.value) {
+      els.batchMatchCount.textContent = "Select a field and value to see how many rows match.";
+    } else if (n === 0) {
+      els.batchMatchCount.textContent = "No rows match \u2014 try a different field or value.";
+    } else {
+      els.batchMatchCount.textContent = n + (n === 1 ? " row matches" : " rows match") +
+        " \u2014 will produce a " + n + "-page PDF.";
+    }
+    if (els.btnBatchGenerate) els.btnBatchGenerate.disabled = n === 0;
+  }
+
+  function onBatchFieldChange() {
+    populateBatchValueSelect();
+    updateBatchMatchCount();
+  }
+
+  function openBatchModal() {
+    if (!state.allRecords.length) {
+      alert("No rows are available from the connected table yet.");
+      return;
+    }
+    populateBatchFieldSelect();
+    populateBatchValueSelect();
+    updateBatchMatchCount();
+    if (els.batchProgress) els.batchProgress.classList.add("hidden");
+    els.batchModalOverlay.classList.remove("hidden");
+  }
+
+  function closeBatchModal() {
+    if (state.batchRunning) return;
+    els.batchModalOverlay.classList.add("hidden");
+  }
+
+  function batchExportFilename(fieldTitle, value, count) {
+    var base = "certificates_" + fieldTitle + "_" + value + "_" + count;
+    return base.replace(/[^a-z0-9\-_]+/gi, "_").slice(0, 80) || "certificates_batch";
+  }
+
+  async function generateBatchPdf() {
+    var matches = getBatchMatches();
+    if (!matches.length) return;
+    var jsPDFCtor = window.jspdf && window.jspdf.jsPDF;
+    if (!jsPDFCtor) { alert("PDF library failed to load."); return; }
+
+    var fieldDef = fieldDefByKey(els.batchFieldSelect.value);
+    var value = els.batchValueSelect.value;
+
+    state.batchRunning = true;
+    els.btnBatchGenerate.disabled = true;
+    els.btnBatchCancel.disabled = true;
+    els.batchProgress.classList.remove("hidden");
+
+    var savedRecord = state.record, savedRecordId = state.recordId;
+    var pdf = null;
+    try {
+      for (var idx = 0; idx < matches.length; idx++) {
+        els.batchProgress.textContent = "Rendering " + (idx + 1) + " of " + matches.length + "\u2026";
+        var rec = matches[idx];
+        state.record = rec;
+        state.recordId = rec.__rowId != null ? rec.__rowId : null;
+        var canvas = document.createElement("canvas");
+        await drawOnCanvas(canvas, true);
+        var ratio = canvas.width / canvas.height;
+        var longEdge = 280;
+        var pdfW, pdfH;
+        if (ratio >= 1) { pdfW = longEdge; pdfH = longEdge / ratio; } else { pdfH = longEdge; pdfW = longEdge * ratio; }
+        var orientation = ratio >= 1 ? "landscape" : "portrait";
+        var imgData = canvas.toDataURL("image/jpeg", 0.92);
+        if (!pdf) {
+          pdf = new jsPDFCtor({ orientation: orientation, unit: "mm", format: [pdfW, pdfH] });
+        } else {
+          pdf.addPage([pdfW, pdfH], orientation);
+        }
+        pdf.addImage(imgData, "JPEG", 0, 0, pdfW, pdfH);
+      }
+      pdf.save(batchExportFilename(fieldDef ? fieldDef.title : "batch", value, matches.length) + ".pdf");
+      state.batchRunning = false;
+      closeBatchModal();
+    } finally {
+      state.record = savedRecord;
+      state.recordId = savedRecordId;
+      renderPreview();
+      state.batchRunning = false;
+      els.btnBatchGenerate.disabled = false;
+      els.btnBatchCancel.disabled = false;
+      els.batchProgress.classList.add("hidden");
+    }
+  }
+
   // ---------- Persistence ----------
 
   var demoConfigMemory = null;
@@ -1205,6 +1397,14 @@
     els.editorFields = q("editor-fields");
     els.btnResetLayout = q("btn-reset-layout");
     els.btnSaveLayout = q("btn-save-layout");
+    els.btnBatch = q("btn-batch");
+    els.batchModalOverlay = q("batch-modal-overlay");
+    els.batchFieldSelect = q("batch-field-select");
+    els.batchValueSelect = q("batch-value-select");
+    els.batchMatchCount = q("batch-match-count");
+    els.batchProgress = q("batch-progress");
+    els.btnBatchCancel = q("btn-batch-cancel");
+    els.btnBatchGenerate = q("btn-batch-generate");
   }
 
   function wireEvents() {
@@ -1245,6 +1445,22 @@
       if (state.mode === "settings") { layoutEditorStage(); positionAllLabels(); }
     });
     document.addEventListener("keydown", nudgeSelected);
+
+    if (els.btnBatch) els.btnBatch.addEventListener("click", openBatchModal);
+    if (els.btnBatchCancel) els.btnBatchCancel.addEventListener("click", closeBatchModal);
+    if (els.batchFieldSelect) els.batchFieldSelect.addEventListener("change", onBatchFieldChange);
+    if (els.batchValueSelect) els.batchValueSelect.addEventListener("change", updateBatchMatchCount);
+    if (els.btnBatchGenerate) els.btnBatchGenerate.addEventListener("click", generateBatchPdf);
+    if (els.batchModalOverlay) {
+      els.batchModalOverlay.addEventListener("click", function (ev) {
+        if (ev.target === els.batchModalOverlay) closeBatchModal();
+      });
+    }
+    document.addEventListener("keydown", function (ev) {
+      if (ev.key === "Escape" && els.batchModalOverlay && !els.batchModalOverlay.classList.contains("hidden")) {
+        closeBatchModal();
+      }
+    });
   }
 
   function init() {
@@ -1254,6 +1470,7 @@
     if (DEMO) {
       state.config = migrateConfig(demoConfigMemory);
       state.record = DEMO_RECORD;
+      state.allRecords = DEMO_RECORDS;
       loadAllBgImages(function () { renderPreview(); });
       restoreAllPdfDocs();
       updateStatusFromState();
@@ -1292,6 +1509,18 @@
       state.record = window.grist.mapColumnNames(record, mappings) || null;
       updateStatusFromState();
       renderPreview();
+    });
+
+    // Keeps state.allRecords in sync with every row currently linked/visible
+    // in the connected Grist view (respects Grist's own filters/sort), for
+    // the batch-generate feature. Independent of the single-record selection
+    // used for the on-screen preview above.
+    window.grist.onRecords(function (records, mappings) {
+      state.allRecords = (records || []).map(function (r) {
+        var mapped = window.grist.mapColumnNames(r, mappings) || {};
+        mapped.__rowId = r.id;
+        return mapped;
+      });
     });
 
     setStatus("Connected to Grist — select a row to preview a certificate.");

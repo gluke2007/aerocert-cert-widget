@@ -299,3 +299,28 @@ html, body {
   .settings-grid { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
   .settings-sidebar { border-right: none; border-bottom: 1px solid var(--border); max-height: 40%; }
 }
+
+/* ---- Batch generate modal ---- */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(16, 35, 61, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  padding: 16px;
+}
+.modal-card {
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 20px;
+  width: 100%;
+  max-width: 380px;
+}
+.modal-card h3 { margin: 0 0 6px; font-size: 15px; color: var(--navy); }
+.modal-card .hint { margin: 0 0 12px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+#batch-match-count { font-weight: 500; color: var(--text); }
+#batch-progress { font-weight: 500; color: var(--accent); }

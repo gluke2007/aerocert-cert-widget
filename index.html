@@ -27,6 +27,7 @@
         Layout
       </button>
       <button id="btn-png" class="btn btn-ghost">PNG</button>
+      <button id="btn-batch" class="btn btn-ghost" title="Generate a combined PDF for many rows at once">Batch PDF</button>
       <button id="btn-pdf" class="btn btn-primary">Download PDF</button>
     </div>
   </header>
@@ -159,6 +160,30 @@
   <footer class="statusbar">
     <span id="status-text">Connecting to Grist…</span>
   </footer>
+
+  <div id="batch-modal-overlay" class="modal-overlay hidden">
+    <div class="modal-card" role="dialog" aria-labelledby="batch-modal-title">
+      <h3 id="batch-modal-title">Batch generate PDF</h3>
+      <p class="hint">Pick a field and a value — every matching row is combined into one PDF, one certificate per page, in table order.</p>
+
+      <div class="field-editor" style="margin-bottom:10px">
+        <label>Field
+          <select id="batch-field-select"></select>
+        </label>
+        <label>Value
+          <select id="batch-value-select"></select>
+        </label>
+      </div>
+
+      <p class="hint" id="batch-match-count">Select a field and value to see how many rows match.</p>
+      <p class="hint hidden" id="batch-progress"></p>
+
+      <div class="modal-actions">
+        <button id="btn-batch-cancel" class="btn btn-text">Cancel</button>
+        <button id="btn-batch-generate" class="btn btn-primary" disabled>Generate PDF</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
