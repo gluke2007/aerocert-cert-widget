@@ -473,8 +473,19 @@
     for (var i = 0; i < buttons.length; i++) {
       var btn = buttons[i];
       var slot = btn.dataset.slot;
+      var hasBg = !!bgs[slot].bgImage;
       btn.classList.toggle("active", slot === state.editingSlot);
-      btn.classList.toggle("has-bg", !!bgs[slot].bgImage);
+      btn.classList.toggle("has-bg", hasBg);
+      var thumbImg = btn.querySelector(".bg-slot-thumb img");
+      if (thumbImg) {
+        if (hasBg) {
+          if (thumbImg.src !== bgs[slot].bgImage) thumbImg.src = bgs[slot].bgImage;
+          thumbImg.alt = SLOT_LABELS[slot] + " background preview";
+        } else {
+          thumbImg.removeAttribute("src");
+          thumbImg.alt = "";
+        }
+      }
     }
     if (els.bgSlotStatus) {
       var editing = state.editingSlot;

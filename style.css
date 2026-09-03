@@ -158,10 +158,14 @@ html, body {
 }
 .upload-btn:hover { border-color: var(--accent); background: var(--accent-soft); }
 
-.bg-slot-tabs { display: flex; gap: 4px; margin-bottom: 6px; }
+.bg-slot-tabs { display: flex; gap: 6px; margin-bottom: 6px; }
 .bg-slot-tab {
   flex: 1;
-  padding: 6px 4px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 4px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: #fff;
@@ -174,16 +178,24 @@ html, body {
 }
 .bg-slot-tab:hover { border-color: var(--accent); color: var(--text); }
 .bg-slot-tab.active { border-color: var(--accent); background: var(--accent-soft); color: var(--navy); }
-.bg-slot-tab.has-bg::after {
-  content: "";
-  position: absolute;
-  top: 3px;
-  right: 3px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
+.bg-slot-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  aspect-ratio: 4 / 2.6;
+  border-radius: 4px;
+  border: 1px dashed var(--border);
+  background: repeating-conic-gradient(#f3f4f6 0% 25%, #fff 0% 50%) 0 0 / 10px 10px;
+  overflow: hidden;
 }
+.bg-slot-tab.active .bg-slot-thumb { border-color: var(--accent); border-style: solid; }
+.bg-slot-thumb img { display: none; width: 100%; height: 100%; object-fit: cover; }
+.bg-slot-thumb-empty { font-size: 9px; font-weight: 500; color: var(--text-mute); text-transform: uppercase; letter-spacing: .02em; }
+.bg-slot-tab.has-bg .bg-slot-thumb img { display: block; }
+.bg-slot-tab.has-bg .bg-slot-thumb-empty { display: none; }
+.bg-slot-tab.has-bg .bg-slot-thumb { border-style: solid; background: none; }
+.bg-slot-label { line-height: 1.1; }
 #bg-slot-status { font-weight: 500; }
 
 .field-list { display: flex; flex-direction: column; gap: 4px; }
