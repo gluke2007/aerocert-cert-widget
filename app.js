@@ -57,12 +57,27 @@
     RegulationBasis: "UK CAA Part-66 / Part-147 Compliant"
   };
 
+  // Three independently-managed background slots. "default" is the fallback
+  // used whenever a record's Regulation Basis text doesn't clearly match
+  // EASA or CAA (or when the matching slot has no upload of its own).
+  var SLOTS = ["default", "easa", "caa"];
+  var SLOT_LABELS = { default: "Default", easa: "EASA", caa: "CAA" };
+
+  function defaultBgSlot() {
+    return { bgImage: null, pdfPageNum: null, pdfSource: null };
+  }
+
   function defaultConfig() {
     var fields = {};
     ALL_FIELD_DEFS.forEach(function (f) {
       fields[f.key] = Object.assign({}, DEFAULT_FIELD_STYLE[f.key]);
     });
-    return { bgImage: null, bgWidth: 1600, bgHeight: 1131, pdfPageNum: null, pdfSource: null, fields: fields };
+    return {
+      backgrounds: { default: defaultBgSlot(), easa: defaultBgSlot(), caa: defaultBgSlot() },
+      bgWidth: 1600,
+      bgHeight: 1131,
+      fields: fields
+    };
   }
 
   // ---------- Page orientation ----------
@@ -96,11 +111,24 @@
   function migrateConfig(saved) {
     var base = defaultConfig();
     if (!saved) return base;
-    base.bgImage = saved.bgImage || null;
     base.bgWidth = saved.bgWidth || base.bgWidth;
     base.bgHeight = saved.bgHeight || base.bgHeight;
-    base.pdfPageNum = saved.pdfPageNum || null;
-    base.pdfSource = saved.pdfSource || null;
+    if (saved.backgrounds) {
+      SLOTS.forEach(function (slot) {
+        if (saved.backgrounds[slot]) {
+          base.backgrounds[slot] = Object.assign({}, base.backgrounds[slot], saved.backgrounds[slot]);
+        }
+      });
+    } else if (saved.bgImage || saved.pdfPageNum || saved.pdfSource) {
+      // Legacy single-background configs (pre-EASA/CAA slots): migrate the
+      // old top-level bgImage/pdfPageNum/pdfSource into the "default" slot
+      // so existing saved widget configs keep working unchanged.
+      base.backgrounds.default = {
+        bgImage: saved.bgImage || null,
+        pdfPageNum: saved.pdfPageNum || null,
+        pdfSource: saved.pdfSource || null
+      };
+    }
     if (saved.fields) {
       ALL_FIELD_DEFS.forEach(function (f) {
         if (saved.fields[f.key]) {
@@ -117,8 +145,9 @@
     config: defaultConfig(),
     selectedFieldKey: null,
     mode: "preview", // 'preview' | 'settings'
-    pdfDoc: null, // in-memory pdf.js document for the currently uploaded PDF (not persisted)
-    pdfPageCount: 0
+    editingSlot: "default", // which background slot Settings is currently editing
+    pdfDocs: { default: null, easa: null, caa: null }, // in-memory pdf.js docs per slot (not persisted)
+    pdfPageCounts: { default: 0, easa: 0, caa: 0 }
   };
 
   var els = {};
@@ -240,21 +269,107 @@
 
   // ---------- Preview canvas ----------
 
-  var bgImgEl = new Image();
-  var bgImgLoaded = false;
+  // One Image element per background slot, kept loaded/cached so drawOnCanvas
+  // can draw synchronously on every preview tick / export without re-decoding.
+  var bgImages = {
+    default: { el: new Image(), loaded: false },
+    easa: { el: new Image(), loaded: false },
+    caa: { el: new Image(), loaded: false }
+  };
 
-  function loadBgImage(cb) {
-    if (!state.config.bgImage) { bgImgLoaded = false; if (cb) cb(); return; }
-    bgImgEl = new Image();
-    bgImgEl.onload = function () {
-      bgImgLoaded = true;
+  function loadBgImageForSlot(slot, cb) {
+    var src = state.config.backgrounds[slot].bgImage;
+    if (!src) {
+      bgImages[slot] = { el: new Image(), loaded: false };
+      if (cb) cb();
+      return;
+    }
+    var img = new Image();
+    img.onload = function () {
+      bgImages[slot] = { el: img, loaded: true };
       if (cb) cb();
     };
-    bgImgEl.onerror = function () {
-      bgImgLoaded = false;
+    img.onerror = function () {
+      bgImages[slot] = { el: img, loaded: false };
       if (cb) cb();
     };
-    bgImgEl.src = state.config.bgImage;
+    img.src = src;
+  }
+
+  function loadAllBgImages(cb) {
+    var pending = SLOTS.length;
+    var called = false;
+    function done() {
+      pending--;
+      if (pending <= 0 && !called) { called = true; if (cb) cb(); }
+    }
+    SLOTS.forEach(function (slot) { loadBgImageForSlot(slot, done); });
+  }
+
+  // Which uploaded image should be shown behind the field-editing overlay in
+  // Settings for a given slot. Falls back to Default (then to any other
+  // populated slot) so the field editor always has something to show even
+  // while a specific EASA/CAA variant hasn't been uploaded yet — field
+  // positions are shared across all three backgrounds.
+  function editorBgSrcForSlot(slot) {
+    var bgs = state.config.backgrounds;
+    if (bgs[slot] && bgs[slot].bgImage) return bgs[slot].bgImage;
+    if (bgs.default.bgImage) return bgs.default.bgImage;
+    for (var i = 0; i < SLOTS.length; i++) {
+      if (bgs[SLOTS[i]].bgImage) return bgs[SLOTS[i]].bgImage;
+    }
+    return null;
+  }
+
+  // ---------- Regulation-basis background matching ----------
+  // Matches against the existing free-text RegulationBasis field rather than
+  // a dedicated Choice column, so this works with whatever wording a table
+  // already has (e.g. "UK CAA Part-66 / Part-147 Compliant").
+  function regulationMatch(text) {
+    var t = (text || "").toLowerCase();
+    return { easa: /easa/.test(t), caa: /caa/.test(t) };
+  }
+
+  function resolveBackgroundPick() {
+    var rec = state.record || {};
+    var basis = rec.RegulationBasis == null ? "" : String(rec.RegulationBasis);
+    var m = regulationMatch(basis);
+    var bgs = state.config.backgrounds;
+    var hasEasa = !!bgs.easa.bgImage;
+    var hasCaa = !!bgs.caa.bgImage;
+    if (m.easa && m.caa) {
+      if (hasEasa && hasCaa) return { blend: true, a: "easa", b: "caa" };
+      if (hasEasa) return { blend: false, slot: "easa" };
+      if (hasCaa) return { blend: false, slot: "caa" };
+      return { blend: false, slot: "default" };
+    }
+    if (m.easa) return { blend: false, slot: hasEasa ? "easa" : "default" };
+    if (m.caa) return { blend: false, slot: hasCaa ? "caa" : "default" };
+    return { blend: false, slot: "default" };
+  }
+
+  // Fits an image inside the page (contain, never stretching/cropping) at the
+  // given opacity — alpha < 1 is how the EASA+CAA "Both" case is crossfaded.
+  function drawFittedImage(ctx, w, h, entry, alpha) {
+    if (!entry || !entry.loaded || !entry.el.naturalWidth || !entry.el.naturalHeight) return;
+    var iw = entry.el.naturalWidth, ih = entry.el.naturalHeight;
+    var fitScale = Math.min(w / iw, h / ih);
+    var dw = iw * fitScale, dh = ih * fitScale;
+    var dx = (w - dw) / 2, dy = (h - dh) / 2;
+    var prevAlpha = ctx.globalAlpha;
+    ctx.globalAlpha = alpha == null ? 1 : alpha;
+    ctx.drawImage(entry.el, dx, dy, dw, dh);
+    ctx.globalAlpha = prevAlpha;
+  }
+
+  function drawResolvedBackground(ctx, w, h) {
+    var pick = resolveBackgroundPick();
+    if (pick.blend) {
+      drawFittedImage(ctx, w, h, bgImages[pick.a], 1);
+      drawFittedImage(ctx, w, h, bgImages[pick.b], 0.5);
+    } else {
+      drawFittedImage(ctx, w, h, bgImages[pick.slot], 1);
+    }
   }
 
   async function drawOnCanvas(canvas, forExport) {
@@ -265,15 +380,7 @@
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, w, h);
-    // Fit the uploaded template inside the chosen page (contain), never
-    // stretching or cropping it, so switching orientation never distorts it.
-    if (bgImgLoaded && bgImgEl.naturalWidth && bgImgEl.naturalHeight) {
-      var iw = bgImgEl.naturalWidth, ih = bgImgEl.naturalHeight;
-      var fitScale = Math.min(w / iw, h / ih);
-      var dw = iw * fitScale, dh = ih * fitScale;
-      var dx = (w - dw) / 2, dy = (h - dh) / 2;
-      ctx.drawImage(bgImgEl, dx, dy, dw, dh);
-    }
+    drawResolvedBackground(ctx, w, h);
     var values = getValues();
     var audit = await computeAuditInfo(values);
 
@@ -311,7 +418,7 @@
 
   async function renderPreview() {
     var hasRecord = state.record != null;
-    var hasBg = !!state.config.bgImage;
+    var hasBg = SLOTS.some(function (slot) { return !!state.config.backgrounds[slot].bgImage; });
     if (!hasBg) {
       els.emptyText.textContent = "Open Layout to upload a certificate template image.";
       els.emptyState.classList.remove("hidden");
@@ -343,22 +450,84 @@
 
   // ---------- Settings / editor ----------
 
+  // Shows/hides the editor-stage image based on whichever background source
+  // applies to the slot currently being edited (see editorBgSrcForSlot).
+  function refreshEditorStageVisual() {
+    var src = editorBgSrcForSlot(state.editingSlot);
+    if (src) {
+      els.editorEmpty.classList.add("hidden");
+      els.editorStage.classList.remove("hidden");
+      els.editorBg.src = src;
+    } else {
+      els.editorEmpty.classList.remove("hidden");
+      els.editorStage.classList.add("hidden");
+    }
+  }
+
+  // Reflects which slot currently has its own upload (dot indicator), which
+  // one is being edited, and a status line explaining fallback behavior.
+  function updateSlotTabsUI() {
+    if (!els.bgSlotTabs) return;
+    var bgs = state.config.backgrounds;
+    var buttons = els.bgSlotTabs.querySelectorAll(".bg-slot-tab");
+    for (var i = 0; i < buttons.length; i++) {
+      var btn = buttons[i];
+      var slot = btn.dataset.slot;
+      btn.classList.toggle("active", slot === state.editingSlot);
+      btn.classList.toggle("has-bg", !!bgs[slot].bgImage);
+    }
+    if (els.bgSlotStatus) {
+      var editing = state.editingSlot;
+      if (editing === "default") {
+        els.bgSlotStatus.textContent = "Used when Regulation Basis doesn't match EASA or CAA.";
+      } else if (bgs[editing].bgImage) {
+        els.bgSlotStatus.textContent = SLOT_LABELS[editing] + " background is set \u2014 used when Regulation Basis mentions " + SLOT_LABELS[editing] + ".";
+      } else {
+        els.bgSlotStatus.textContent = "No " + SLOT_LABELS[editing] + " background set \u2014 falls back to Default.";
+      }
+    }
+  }
+
+  // Syncs the shared PDF-page-picker inputs to whichever slot is being
+  // edited right now (each slot keeps its own live pdf.js doc/page count).
+  function syncPdfPageGroupUI() {
+    var slot = state.editingSlot;
+    var doc = state.pdfDocs[slot];
+    var count = state.pdfPageCounts[slot];
+    if (!els.pdfPageGroup || !els.pdfPageNum || !els.pdfPageTotal) return;
+    if (doc && count > 1) {
+      els.pdfPageNum.min = 1;
+      els.pdfPageNum.max = count;
+      els.pdfPageNum.value = clamp(state.config.backgrounds[slot].pdfPageNum || 1, 1, count);
+      els.pdfPageTotal.textContent = "of " + count + " pages";
+      els.pdfPageGroup.classList.remove("hidden");
+    } else {
+      els.pdfPageGroup.classList.add("hidden");
+    }
+  }
+
+  function switchEditingSlot(slot) {
+    if (!state.config.backgrounds[slot]) return;
+    state.editingSlot = slot;
+    updateSlotTabsUI();
+    refreshEditorStageVisual();
+    syncPdfPageGroupUI();
+    updatePdfPageHint();
+    layoutEditorStage();
+    positionAllLabels();
+  }
+
   function enterSettings() {
     state.mode = "settings";
     els.viewPreview.classList.add("hidden");
     els.viewSettings.classList.remove("hidden");
     if (els.orientation) els.orientation.value = currentOrientation();
-    if (state.config.bgImage) {
-      els.editorEmpty.classList.add("hidden");
-      els.editorStage.classList.remove("hidden");
-      els.editorBg.src = state.config.bgImage;
-    } else {
-      els.editorEmpty.classList.remove("hidden");
-      els.editorStage.classList.add("hidden");
-    }
+    updateSlotTabsUI();
+    refreshEditorStageVisual();
     buildFieldList();
     layoutEditorStage();
     positionAllLabels();
+    syncPdfPageGroupUI();
     updatePdfPageHint();
   }
 
@@ -450,7 +619,7 @@
 
   function positionAllLabels() {
     els.editorFields.innerHTML = "";
-    if (!state.config.bgImage) return;
+    if (!editorBgSrcForSlot(state.editingSlot)) return;
     var scale = editorScale();
     ALL_FIELD_DEFS.forEach(function (f) {
       var style = state.config.fields[f.key];
@@ -578,8 +747,8 @@
 
   function applyIncomingOptions(options) {
     state.config = migrateConfig(options && options.certConfig);
-    loadBgImage(function () { renderPreview(); });
-    restorePdfDocFromSource();
+    loadAllBgImages(function () { renderPreview(); });
+    restoreAllPdfDocs();
     if (state.mode === "settings") enterSettings();
   }
 
@@ -654,17 +823,18 @@
   // fitted background, snaps the page orientation to match the new file's own
   // aspect (the user can still override it with the orientation selector),
   // and refreshes the editor/preview.
-  function applyBgFromCanvas(canvas, mime, quality) {
+  function applyBgFromCanvas(canvas, mime, quality, slotArg) {
+    var slot = slotArg || state.editingSlot;
     var dataUrl = canvas.toDataURL(mime, quality);
-    state.config.bgImage = dataUrl;
+    state.config.backgrounds[slot].bgImage = dataUrl;
     setOrientation(canvas.width >= canvas.height ? "landscape" : "portrait");
-    els.editorEmpty.classList.add("hidden");
-    els.editorStage.classList.remove("hidden");
-    els.editorBg.src = dataUrl;
-    loadBgImage(function () { renderPreview(); });
+    if (slot === state.editingSlot) refreshEditorStageVisual();
+    loadBgImageForSlot(slot, function () { renderPreview(); });
+    updateSlotTabsUI();
   }
 
   function handleImageUpload(file) {
+    var slot = state.editingSlot;
     var reader = new FileReader();
     reader.onload = function () {
       var img = new Image();
@@ -678,7 +848,7 @@
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         var quality = file.type === "image/png" ? undefined : 0.88;
         var mime = file.type === "image/png" ? "image/png" : "image/jpeg";
-        applyBgFromCanvas(canvas, mime, quality);
+        applyBgFromCanvas(canvas, mime, quality, slot);
       };
       img.onerror = function () {
         alert("Could not read that image. Please try a different file.");
@@ -694,12 +864,14 @@
   // last used.
   function updatePdfPageHint() {
     if (!els.pdfPageHint) return;
-    if (state.pdfDoc) {
+    var slot = state.editingSlot;
+    if (state.pdfDocs[slot]) {
       els.pdfPageHint.classList.add("hidden");
       return;
     }
-    if (state.config.pdfPageNum) {
-      els.pdfPageHint.textContent = "Background last set from PDF page " + state.config.pdfPageNum + ". Upload the PDF again to switch pages.";
+    var pageNum = state.config.backgrounds[slot].pdfPageNum;
+    if (pageNum) {
+      els.pdfPageHint.textContent = "Background last set from PDF page " + pageNum + ". Upload the PDF again to switch pages.";
       els.pdfPageHint.classList.remove("hidden");
     } else {
       els.pdfPageHint.classList.add("hidden");
@@ -729,66 +901,66 @@
     return bytes;
   }
 
-  // Rehydrates state.pdfDoc/state.pdfPageCount and the page-picker UI from a
-  // persisted config's pdfSource, without touching the already-loaded
-  // background image. Called whenever a config arrives (initial load or a
-  // later onOptions update) so the picker is live again after a reload.
-  function restorePdfDocFromSource() {
-    if (!state.config.pdfSource) {
-      hidePdfPagePicker();
-      updatePdfPageHint();
+  // Rehydrates state.pdfDocs[slot]/state.pdfPageCounts[slot] and the page-
+  // picker UI (if this slot is the one being edited) from a persisted
+  // config's pdfSource, without touching the already-loaded background
+  // image. Called for every slot whenever a config arrives (initial load or
+  // a later onOptions update) so each slot's picker is live after a reload.
+  function restorePdfDocFromSource(slot) {
+    var bg = state.config.backgrounds[slot];
+    if (!bg.pdfSource) {
+      hidePdfPagePicker(slot);
+      if (slot === state.editingSlot) updatePdfPageHint();
       return;
     }
     var pdfjsLib = window["pdfjs-dist/build/pdf"];
     if (!pdfjsLib) {
       // pdf.js hasn't finished loading yet; fall back to the status hint.
-      updatePdfPageHint();
+      if (slot === state.editingSlot) updatePdfPageHint();
       return;
     }
     var bytes;
     try {
-      bytes = dataUrlToUint8Array(state.config.pdfSource);
+      bytes = dataUrlToUint8Array(bg.pdfSource);
     } catch (err) {
       console.error(err);
-      hidePdfPagePicker();
-      updatePdfPageHint();
+      hidePdfPagePicker(slot);
+      if (slot === state.editingSlot) updatePdfPageHint();
       return;
     }
     pdfjsLib.getDocument({ data: bytes }).promise
       .then(function (pdf) {
-        state.pdfDoc = pdf;
-        state.pdfPageCount = pdf.numPages;
-        if (els.pdfPageGroup && els.pdfPageNum && els.pdfPageTotal) {
-          if (pdf.numPages > 1) {
-            els.pdfPageNum.min = 1;
-            els.pdfPageNum.max = pdf.numPages;
-            els.pdfPageNum.value = clamp(state.config.pdfPageNum || 1, 1, pdf.numPages);
-            els.pdfPageTotal.textContent = "of " + pdf.numPages + " pages";
-            els.pdfPageGroup.classList.remove("hidden");
-          } else {
-            els.pdfPageGroup.classList.add("hidden");
-          }
+        state.pdfDocs[slot] = pdf;
+        state.pdfPageCounts[slot] = pdf.numPages;
+        if (slot === state.editingSlot) {
+          syncPdfPageGroupUI();
+          updatePdfPageHint();
         }
-        updatePdfPageHint();
       })
       .catch(function (err) {
         console.error(err);
-        hidePdfPagePicker();
-        updatePdfPageHint();
+        hidePdfPagePicker(slot);
+        if (slot === state.editingSlot) updatePdfPageHint();
       });
   }
 
-  // Renders a single page of the currently-loaded PDF (state.pdfDoc) onto a
-  // canvas and applies it as the background. Shared by the initial upload and
-  // by the page-picker input, so switching pages later re-renders in place
-  // without needing the file to be re-selected. Remembers the chosen page
-  // number in state.config so it survives a save/reload and is used to
-  // default the next PDF upload to the same page.
-  function renderPdfPage(pageNum) {
-    if (!state.pdfDoc) return;
-    pageNum = clamp(Math.round(pageNum), 1, state.pdfPageCount);
-    if (els.pdfPageNum) els.pdfPageNum.value = pageNum;
-    state.pdfDoc.getPage(pageNum)
+  function restoreAllPdfDocs() {
+    SLOTS.forEach(function (slot) { restorePdfDocFromSource(slot); });
+  }
+
+  // Renders a single page of the given slot's currently-loaded PDF onto a
+  // canvas and applies it as that slot's background. Shared by the initial
+  // upload and by the page-picker input, so switching pages later re-renders
+  // in place without needing the file to be re-selected. Remembers the
+  // chosen page number in state.config so it survives a save/reload and is
+  // used to default the next PDF upload to the same page.
+  function renderPdfPage(pageNum, slotArg) {
+    var slot = slotArg || state.editingSlot;
+    var doc = state.pdfDocs[slot];
+    if (!doc) return;
+    pageNum = clamp(Math.round(pageNum), 1, state.pdfPageCounts[slot]);
+    if (slot === state.editingSlot && els.pdfPageNum) els.pdfPageNum.value = pageNum;
+    doc.getPage(pageNum)
       .then(function (page) {
         var base = page.getViewport({ scale: 1 });
         var TARGET_LONG_EDGE = 2000;
@@ -801,13 +973,12 @@
         ctx.fillStyle = "#ffffff";
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         return page.render({ canvasContext: ctx, viewport: viewport }).promise.then(function () {
-          state.config.pdfPageNum = pageNum;
-          applyBgFromCanvas(canvas, "image/jpeg", 0.92);
-          if (els.pdfPageGroup && els.pdfPageTotal && state.pdfPageCount > 1) {
-            els.pdfPageTotal.textContent = "of " + state.pdfPageCount + " pages";
-            els.pdfPageGroup.classList.remove("hidden");
+          state.config.backgrounds[slot].pdfPageNum = pageNum;
+          applyBgFromCanvas(canvas, "image/jpeg", 0.92, slot);
+          if (slot === state.editingSlot) {
+            syncPdfPageGroupUI();
+            updatePdfPageHint();
           }
-          updatePdfPageHint();
         });
       })
       .catch(function (err) {
@@ -816,13 +987,14 @@
       });
   }
 
-  // Clears the live in-memory pdf.js document/picker only — does not touch
-  // the persisted config (state.config.pdfSource/pdfPageNum), so a restore
-  // can still rebuild it from a saved config afterward.
-  function hidePdfPagePicker() {
-    state.pdfDoc = null;
-    state.pdfPageCount = 0;
-    if (els.pdfPageGroup) els.pdfPageGroup.classList.add("hidden");
+  // Clears the live in-memory pdf.js document/picker for one slot only —
+  // does not touch the persisted config (backgrounds[slot].pdfSource /
+  // pdfPageNum), so a restore can still rebuild it from a saved config.
+  function hidePdfPagePicker(slot) {
+    slot = slot || state.editingSlot;
+    state.pdfDocs[slot] = null;
+    state.pdfPageCounts[slot] = 0;
+    if (slot === state.editingSlot && els.pdfPageGroup) els.pdfPageGroup.classList.add("hidden");
   }
 
   // Grist stores widget options (including our whole certConfig, now with
@@ -831,6 +1003,7 @@
   var PDF_SIZE_WARN_BYTES = 8 * 1024 * 1024;
 
   function handlePdfUpload(file) {
+    var slot = state.editingSlot;
     if (file.size > PDF_SIZE_WARN_BYTES) {
       var proceed = confirm(
         "This PDF is " + Math.round(file.size / 1024 / 1024) + "MB. Storing the full file with the certificate layout may be " +
@@ -848,29 +1021,19 @@
       var pdfBase64Source = "data:application/pdf;base64," + arrayBufferToBase64(reader.result);
       pdfjsLib.getDocument({ data: reader.result }).promise
         .then(function (pdf) {
-          state.pdfDoc = pdf;
-          state.pdfPageCount = pdf.numPages;
-          state.config.pdfSource = pdfBase64Source;
+          state.pdfDocs[slot] = pdf;
+          state.pdfPageCounts[slot] = pdf.numPages;
+          state.config.backgrounds[slot].pdfSource = pdfBase64Source;
           // Default to whichever page was remembered from a previous upload,
           // as long as it's still within range of this document.
-          var remembered = state.config.pdfPageNum;
+          var remembered = state.config.backgrounds[slot].pdfPageNum;
           var startPage = (remembered && remembered >= 1 && remembered <= pdf.numPages) ? remembered : 1;
-          if (els.pdfPageGroup && els.pdfPageNum && els.pdfPageTotal) {
-            if (pdf.numPages > 1) {
-              els.pdfPageNum.min = 1;
-              els.pdfPageNum.max = pdf.numPages;
-              els.pdfPageNum.value = startPage;
-              els.pdfPageTotal.textContent = "of " + pdf.numPages + " pages";
-              els.pdfPageGroup.classList.remove("hidden");
-            } else {
-              els.pdfPageGroup.classList.add("hidden");
-            }
-          }
-          renderPdfPage(startPage);
+          if (slot === state.editingSlot) syncPdfPageGroupUI();
+          renderPdfPage(startPage, slot);
         })
         .catch(function (err) {
           console.error(err);
-          hidePdfPagePicker();
+          hidePdfPagePicker(slot);
           alert("Could not read that PDF. Please try a different file, or upload a PNG/JPG of the first page instead.");
         });
     };
@@ -882,11 +1045,12 @@
 
   function handleBgUpload(file) {
     var isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name || "");
+    var slot = state.editingSlot;
     if (isPdf) handlePdfUpload(file);
     else {
-      hidePdfPagePicker();
-      state.config.pdfPageNum = null;
-      state.config.pdfSource = null;
+      hidePdfPagePicker(slot);
+      state.config.backgrounds[slot].pdfPageNum = null;
+      state.config.backgrounds[slot].pdfSource = null;
       handleImageUpload(file);
       updatePdfPageHint();
     }
@@ -899,15 +1063,12 @@
   }
 
   function resetLayout() {
-    if (!confirm("Reset all field positions and styles to defaults? The template image is kept.")) return;
-    var bg = state.config.bgImage, w = state.config.bgWidth, h = state.config.bgHeight,
-        pdfPageNum = state.config.pdfPageNum, pdfSource = state.config.pdfSource;
+    if (!confirm("Reset all field positions and styles to defaults? The template images are kept.")) return;
+    var backgrounds = state.config.backgrounds, w = state.config.bgWidth, h = state.config.bgHeight;
     state.config = defaultConfig();
-    state.config.bgImage = bg;
+    state.config.backgrounds = backgrounds;
     state.config.bgWidth = w;
     state.config.bgHeight = h;
-    state.config.pdfPageNum = pdfPageNum;
-    state.config.pdfSource = pdfSource;
     state.selectedFieldKey = null;
     els.feBlock.style.display = "none";
     buildFieldList();
@@ -916,14 +1077,15 @@
   }
 
   function removeBg() {
-    state.config.bgImage = null;
-    bgImgLoaded = false;
-    hidePdfPagePicker();
-    state.config.pdfPageNum = null;
-    state.config.pdfSource = null;
+    var slot = state.editingSlot;
+    state.config.backgrounds[slot].bgImage = null;
+    bgImages[slot] = { el: new Image(), loaded: false };
+    hidePdfPagePicker(slot);
+    state.config.backgrounds[slot].pdfPageNum = null;
+    state.config.backgrounds[slot].pdfSource = null;
     updatePdfPageHint();
-    els.editorEmpty.classList.remove("hidden");
-    els.editorStage.classList.add("hidden");
+    updateSlotTabsUI();
+    refreshEditorStageVisual();
     renderPreview();
   }
 
@@ -1003,6 +1165,8 @@
     els.btnPng = q("btn-png");
     els.btnPdf = q("btn-pdf");
     els.orientation = q("page-orientation");
+    els.bgSlotTabs = q("bg-slot-tabs");
+    els.bgSlotStatus = q("bg-slot-status");
     els.bgUpload = q("bg-upload");
     els.btnRemoveBg = q("btn-remove-bg");
     els.pdfPageGroup = q("pdf-page-group");
@@ -1047,6 +1211,14 @@
       });
     }
     els.btnRemoveBg.addEventListener("click", removeBg);
+    if (els.bgSlotTabs) {
+      var slotButtons = els.bgSlotTabs.querySelectorAll(".bg-slot-tab");
+      for (var si = 0; si < slotButtons.length; si++) {
+        slotButtons[si].addEventListener("click", function (ev) {
+          switchEditingSlot(ev.currentTarget.dataset.slot);
+        });
+      }
+    }
     if (els.pdfPageNum) {
       els.pdfPageNum.addEventListener("change", function () {
         renderPdfPage(parseInt(els.pdfPageNum.value, 10) || 1);
@@ -1071,8 +1243,8 @@
     if (DEMO) {
       state.config = migrateConfig(demoConfigMemory);
       state.record = DEMO_RECORD;
-      loadBgImage(function () { renderPreview(); });
-      restorePdfDocFromSource();
+      loadAllBgImages(function () { renderPreview(); });
+      restoreAllPdfDocs();
       updateStatusFromState();
       renderPreview();
       return;

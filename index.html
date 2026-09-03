@@ -53,7 +53,7 @@
         <div class="settings-sidebar">
           <div class="side-block">
             <h3>Template image</h3>
-            <p class="hint">Upload your certificate background (PNG, JPG, or PDF). Pick portrait or landscape below — your file is fitted to the page without cropping or stretching.</p>
+            <p class="hint">Upload a certificate background for each regulation type. A variant left unset automatically falls back to Default. If Regulation Basis mentions both EASA and CAA, the two backgrounds are blended together.</p>
             <div class="field-editor" style="margin-bottom:10px">
               <label>Page orientation
                 <select id="page-orientation">
@@ -62,6 +62,12 @@
                 </select>
               </label>
             </div>
+            <div class="bg-slot-tabs" id="bg-slot-tabs">
+              <button type="button" class="bg-slot-tab active" data-slot="default">Default</button>
+              <button type="button" class="bg-slot-tab" data-slot="easa">EASA</button>
+              <button type="button" class="bg-slot-tab" data-slot="caa">CAA</button>
+            </div>
+            <p class="hint" id="bg-slot-status" style="margin-top:2px"></p>
             <label class="upload-btn">
               <input type="file" id="bg-upload" accept="image/png, image/jpeg, application/pdf" hidden />
               Choose image or PDF
